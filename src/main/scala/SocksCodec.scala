@@ -1,14 +1,15 @@
 package cvb.socks
 
+import java.net.InetAddress
 import java.net.Inet4Address
 import java.net.Inet6Address
 
-import scodec.bits.BitVector
-import scodec.Codec
-import scodec.Err
+import scodec.bits.{ BitVector, ByteVector }
+import scodec.{ Codec, Err,  DecodingContext }
 import scodec.codecs._
 
 import scalaz._
+
 
 object Socks5Codec {
 
@@ -28,6 +29,18 @@ object Socks5Codec {
 
   val HelloRespCodec = (verCodec :: AuthMethodCodec).dropUnits.as[HelloResp]
 
+  val PortCodec: Codec[Int] = uint16
+
+  val V4Codec = bytes(4).xmap[V4](
+    v => V4(InetAddress.getByAddress(v.toArray).asInstanceOf[Inet4Address]),
+    v => ByteVector(v.addr.getAddress())
+  )
+
+  val V6Codec = fail(Err("V6 not implemented"))
+
+  val AddrCodec = discriminated[Addr].by(uint8)
+    .typecase(0x01, V4Codec).typecase(0x03, DomainNameCodec)
+
   val RequestCodec =
     (verCodec :: CmdTypeCodec :: constant(0x00) :: AddrCodec :: PortCodec)
       .dropUnits.as[Request]
@@ -36,15 +49,47 @@ object Socks5Codec {
     (verCodec :: ReplyTypeCodec :: constant(0x00) :: AddrCodec :: PortCodec)
       .dropUnits.as[Response]
 
-  val PortCodec = uint16
+  object DomainNameCodec extends Codec[DomainName] {
+    def encode(s: DomainName) = s match {
+      case DomainName(s1) => (uint8 ~ utf8).encode(s1.length ~ s1)
+    }
+    def decode(v: BitVector) = (for {
+      len  <- DecodingContext(uint8.decode(_))
+      name <- DecodingContext(fixedSizeBytes(len, utf8).decode(_))
+    } yield DomainName(name)).run(v)
+  }
 
-  object ReplyTypeCodec extends Codec[ReplyType]
+  object ReplyTypeCodec extends Codec[ReplyType] {
+    def encode(m: ReplyType) = constant(m.code).encode(m)
+    def decode(v: BitVector) =
+      uint8.decode(v).map { case (b, i) => (b, int2replyType(i)) }
 
-  object CmdTypeCodec extends Codec[CmdType] {
+    def int2replyType(i: Int) = i match {
+      case Succeeded.code            => Succeeded
+      case ServerFailure.code        => ServerFailure
+      case NotAllowed.code           => NotAllowed
+      case NetUnreachable.code       => NetUnreachable
+      case HostUnreachable.code      => HostUnreachable
+      case ConnRefused.code          => ConnRefused
+      case TTLExpired.code           => TTLExpired
+      case CommandNotSupported.code  => CommandNotSupported
+      case AddrTypeNotSupported.code => AddrTypeNotSupported
+      case code                      => Unknown(code)
+    }
 
   }
 
-  object AddrCodec extends Codec[Addr] {
+  object CmdTypeCodec extends Codec[CmdType] {
+    def encode(m: CmdType) = constant(m.code).encode(m)
+    def decode(v: BitVector) =
+      uint8.decode(v).map { case (b, i) => (b, int2cmdType(i)) }
+
+    def int2cmdType(i: Int) = i match {
+      case Connect.code => Connect
+      case Bind.code    => Bind
+      case UDP.code     => UDP
+        // Fixme: use \/ and catch all variants here
+    }
 
   }
 
@@ -99,13 +144,13 @@ object Socks5Codec {
   case object UDP extends CmdType     { val code = 0x03 }
 
 
-  sealed abstract class Addr { val code: Int }
+  sealed abstract class Addr
   // IP V4 address: X'01'
-  case class V4(addr: Inet4Address) { }
+  case class V4(addr: Inet4Address) extends Addr
   // DOMAINNAME: X'03'
-  case class DomainName(addr: String)
+  case class DomainName(addr: String) extends Addr
   // IP V6 address: X'04'
-  case class V6(addr: Inet6Address)
+  case class V6(addr: Inet6Address) extends Addr
 
 
 
